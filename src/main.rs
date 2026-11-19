@@ -107,15 +107,16 @@ impl LrclibQuery {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct LrclibItem {
     pub id: u32,
-    pub trackName: String,
-    pub artistName: String,
-    pub albumName: String,
+    pub track_name: String,
+    pub artist_name: String,
+    pub album_name: String,
     pub duration: f32,
     pub instrumental: bool,
-    pub plainLyrics: Option<String>,
-    pub syncedLyrics: Option<String>,
+    pub plain_lyrics: Option<String>,
+    pub synced_lyrics: Option<String>,
 }
 
 impl LrcLibClient {
@@ -123,7 +124,7 @@ impl LrcLibClient {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("Lrclib-Client", DEFAULT_USER_AGENT.parse().unwrap());
         Self {
-            url: "https://lrclib.net".to_string(),
+            url: url.to_string(),
             client: reqwest::Client::builder().default_headers(headers).user_agent(DEFAULT_USER_AGENT).build().expect("Failed to create reqwest client"),
             delay_ms: 0,
             has_requested: std::sync::atomic::AtomicBool::new(false),
@@ -206,7 +207,7 @@ impl LrcLibClient {
     }
 }
 
-pub async fn write_lrc_for_file(entry: &DirEntry, synced_lyrics: &str, config: &CliConfig) -> anyhow::Result<()> {
+pub async fn write_lrc_for_file(entry: &DirEntry, synced_lyrics: &str) -> anyhow::Result<()> {
     let lrc_path = entry.path().with_extension("lrc");
 
     match File::create(lrc_path).await {
@@ -301,10 +302,10 @@ async fn main() {
                         }
                         match client.get(&lrc_query).await {
                             Ok(Some(lrc_item)) => {
-                                if let Some(synced_lyrics) = &lrc_item.syncedLyrics {
+                                if let Some(synced_lyrics) = &lrc_item.synced_lyrics {
                                     println!("Found synced lrc for {}", entry.path().display());
                                     // write to file with extension changed to .lrc
-                                    match write_lrc_for_file(&entry, synced_lyrics, &config).await {
+                                    match write_lrc_for_file(&entry, synced_lyrics).await {
                                         Ok(_) => {},
                                         Err(err) => {
                                             println!("Error in saving lrc {}: {}",entry.path().display(), err);
@@ -327,7 +328,7 @@ async fn main() {
                                                 println!("Did not find lrc for (no results) {}",entry.path().display());
                                             } else {
                                                 let mut canidates: Vec<LrclibItem> = lrc_items.into_iter().filter(|item| {
-                                                    item.syncedLyrics.is_some() && !item.syncedLyrics.as_ref().unwrap().is_empty()
+                                                    item.synced_lyrics.is_some() && !item.synced_lyrics.as_ref().unwrap().is_empty()
                                                 }).collect();
                                                 if let Some(duration) = &lrc_query.duration {
                                                     // sort by closed to target duration
@@ -353,7 +354,7 @@ async fn main() {
                                                     println!("Searched lrc (found {}secs vs actual {}secs out of {} filtered results) for {}",canidates[0].duration,lrc_query.duration.unwrap_or(-1.0), canidates.len(), entry.path().display());  
                                                     // write to file with extension changed to .lrc
                                                     // TODO: manual duration tolerance?
-                                                    match write_lrc_for_file(&entry, &canidates[0].syncedLyrics.as_ref().unwrap(), &config).await {
+                                                    match write_lrc_for_file(&entry, canidates[0].synced_lyrics.as_ref().unwrap()).await {
                                                         Ok(_) => {},
                                                         Err(err) => {
                                                             println!("Error in saving lrc {}: {}",entry.path().display(), err);
