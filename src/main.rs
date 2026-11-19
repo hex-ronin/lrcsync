@@ -22,7 +22,7 @@ pub struct CliConfig {
     pub search: bool,
     #[arg(short = 't', long = "tolerance", default_value_t = 5.0, help = "tolerance in seconds for searching lrclib")]
     pub tolerance: f32,
-    #[arg(short = 'd', long = "delay", default_value_t = 500, help = "delay in milliseconds between lrclib requests")]
+    #[arg(short = 'd', long = "delay", default_value_t = 0, help = "delay in milliseconds between lrclib requests")]
     pub delay: u64,
 }
 
