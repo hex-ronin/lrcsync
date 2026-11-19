@@ -109,11 +109,12 @@ impl LrclibQuery {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct LrclibItem {
-    pub id: u32,
-    pub track_name: String,
-    pub artist_name: String,
-    pub album_name: String,
-    pub duration: f32,
+    pub id: i64,
+    pub track_name: Option<String>,
+    pub artist_name: Option<String>,
+    pub album_name: Option<String>,
+    pub duration: Option<f32>,
+    #[serde(default)]
     pub instrumental: bool,
     pub plain_lyrics: Option<String>,
     pub synced_lyrics: Option<String>,
@@ -333,25 +334,21 @@ async fn main() {
                                                 if let Some(duration) = &lrc_query.duration {
                                                     // sort by closed to target duration
                                                     canidates.sort_by(|a, b| {
-                                                        let a_duration = a.duration as f32;
-                                                        let b_duration = b.duration as f32;
-                                                        let a_delta = a_duration - duration;
-                                                        let b_delta = b_duration - duration;
-                                                        return a_delta.abs().partial_cmp(&b_delta.abs()).unwrap();
+                                                        let a_delta = a.duration.map(|d| (d - duration).abs()).unwrap_or(f32::INFINITY);
+                                                        let b_delta = b.duration.map(|d| (d - duration).abs()).unwrap_or(f32::INFINITY);
+                                                        a_delta.total_cmp(&b_delta)
                                                     }); 
                                                 
                                                     if config.tolerance > 0.0 {
                                                         canidates = canidates.into_iter().filter(|item| {
-                                                            let item_duration = item.duration as f32;
-                                                            let delta = item_duration - duration;
-                                                            return delta.abs() < config.tolerance;
+                                                            item.duration.map(|d| (d - duration).abs() < config.tolerance).unwrap_or(false)
                                                         }).collect();
                                                     }
                                                 }
 
                                                 if canidates.len() > 0 {
                                                 
-                                                    println!("Searched lrc (found {}secs vs actual {}secs out of {} filtered results) for {}",canidates[0].duration,lrc_query.duration.unwrap_or(-1.0), canidates.len(), entry.path().display());  
+                                                    println!("Searched lrc (found {}secs vs actual {}secs out of {} filtered results) for {}",canidates[0].duration.unwrap_or(-1.0),lrc_query.duration.unwrap_or(-1.0), canidates.len(), entry.path().display());  
                                                     // write to file with extension changed to .lrc
                                                     // TODO: manual duration tolerance?
                                                     match write_lrc_for_file(&entry, canidates[0].synced_lyrics.as_ref().unwrap()).await {
