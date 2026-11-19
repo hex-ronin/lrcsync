@@ -1,6 +1,7 @@
 
 use anyhow::bail;
-use audiotags::Tag;
+use lofty::prelude::*;
+use lofty::probe::Probe;
 use clap::Parser;
 use ignore::{DirEntry, WalkBuilder};
 use serde::{Serialize, Deserialize};
@@ -15,7 +16,7 @@ pub struct CliConfig {
     pub hidden: bool,
     #[arg(short = 'f', long = "force", default_value_t = false, help = "overwrite existing lrc files")]
     pub force: bool,
-    #[arg(short = 'i', long = "ignore", value_parser, num_args = 1, help = "ignore the follow properties when searching lrclib by not sending them, comma seperated")]
+    #[arg(short = 'i', long = "ignore", value_parser, value_delimiter = ',', help = "ignore the follow properties when searching lrclib by not sending them, comma seperated")]
     pub ignore: Vec<String>,
     #[arg(short = 's', long = "search", default_value_t = false, help = "use searching on lrclib as a fallback")]
     pub search: bool,
@@ -64,22 +65,30 @@ impl LrclibQuery {
         query
     }
 
+    pub fn can_use_get(&self) -> bool {
+        !self.track_name.trim().is_empty() && !self.artist_name.trim().is_empty()
+    }
+
     pub fn to_get_query(&self) -> Vec<(String, String)> {
         let mut query = self.to_search_query();
         if let Some(duration) = &self.duration {
-            query.push(("duration".to_string(), duration.to_string()));
+            if duration.is_finite() && (1.0..=3600.0).contains(duration) {
+                query.push(("duration".to_string(), duration.to_string()));
+            }
         }
         query
     }
 
     pub fn to_search_query(&self) -> Vec<(String, String)> {
         let mut query = Vec::new();
-        query.push(("track_name".to_string(), self.track_name.clone()));
-        if self.artist_name.len() > 0 {
-            query.push(("artist_name".to_string(), self.artist_name.clone()));
+        query.push(("track_name".to_string(), self.track_name.trim().to_string()));
+        if !self.artist_name.trim().is_empty() {
+            query.push(("artist_name".to_string(), self.artist_name.trim().to_string()));
         }
         if let Some(album_name) = &self.album_name {
-            query.push(("album_name".to_string(), album_name.clone()));
+            if !album_name.trim().is_empty() {
+                query.push(("album_name".to_string(), album_name.trim().to_string()));
+            }
         }
         query
     }
@@ -120,10 +129,14 @@ impl LrcLibClient {
     }
 
     pub async fn get(&self, query: &LrclibQuery) -> anyhow::Result<Option<LrclibItem>> {
+        if !query.can_use_get() {
+            return Ok(None);
+        }
         let url = format!("{}/api/get" ,self.url);
         let request_builder = self.client.get(url).query(&query.to_get_query());
         let response = request_builder.send().await?;
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             let body = response.text().await?;
             match serde_json::from_str::<LrclibItem>(&body) {
                 Ok(item) => Ok(Some(item)),
@@ -132,10 +145,16 @@ impl LrcLibClient {
                 },
             }
         } else {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
+            if status == reqwest::StatusCode::NOT_FOUND {
                 Ok(None)
             } else {
-                Err(anyhow::anyhow!("Error getting lrclib item: {}", response.status()))
+                let body = response.text().await.unwrap_or_default();
+                let body = body.trim();
+                if body.is_empty() {
+                    Err(anyhow::anyhow!("Error getting lrclib item: {}", status))
+                } else {
+                    Err(anyhow::anyhow!("Error getting lrclib item: {} ({})", status, body))
+                }
             }
         }
     }
@@ -144,7 +163,8 @@ impl LrcLibClient {
         let url = format!("{}/api/search" ,self.url);
         let request_builder = self.client.get(url).query(&query.to_search_query());
         let response = request_builder.send().await?;
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             let body = response.text().await?;
             match serde_json::from_str::<Vec<LrclibItem>>(&body) {
                 Ok(items) => Ok(Some(items)), 
@@ -153,10 +173,16 @@ impl LrcLibClient {
                 },
             }
         } else {
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
+            if status == reqwest::StatusCode::NOT_FOUND {
                 Ok(None)
             } else {
-                Err(anyhow::anyhow!("Error getting lrclib item: {}", response.status()))
+                let body = response.text().await.unwrap_or_default();
+                let body = body.trim();
+                if body.is_empty() {
+                    Err(anyhow::anyhow!("Error getting lrclib item: {}", status))
+                } else {
+                    Err(anyhow::anyhow!("Error getting lrclib item: {} ({})", status, body))
+                }
             }
         }
     }
@@ -208,23 +234,36 @@ async fn main() {
                     continue;
                 }
                 // read file
-                match Tag::new().read_from_path(entry.path()) {
-                    Ok(tag) => {
+                match Probe::open(entry.path()).and_then(|p| p.read()) {
+                    Ok(tagged_file) => {
                         let mut album_name: Option<String> = None;
                         let mut track_name = "".to_string();
                         let mut artist_name = "".to_string();
-                        if let Some(album) = tag.album() {
-                            album_name = Some(album.title.to_string());
+                        if let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) {
+                            if let Some(album) = tag.album() {
+                                if !album.trim().is_empty() {
+                                    album_name = Some(album.trim().to_string());
+                                }
+                            }
+                            if let Some(title) = tag.title() {
+                                track_name = title.trim().to_string();
+                            }
+                            let artists: Vec<&str> = tag.get_strings(ItemKey::TrackArtist).map(str::trim).filter(|s| !s.is_empty()).collect();
+                            if !artists.is_empty() {
+                                artist_name = artists.join(", ");
+                            } else if let Some(artist) = tag.artist() {
+                                artist_name = artist.trim().to_string();
+                            }
                         }
-                        if let Some(title) = tag.title() {
-                            track_name = title.to_string();
+                        if track_name.is_empty() {
+                            println!("Skipping {}: missing track title metadata", entry.path().display());
+                            continue;
                         }
-                        if let Some(artists) = tag.artists() {
-                            artist_name = artists.join(", ");
-                        }
-                        let duration: Option<f32> = match tag.duration() {
-                            Some(duration) => Some(duration as f32),
-                            None => None,
+                        let duration_secs = tagged_file.properties().duration().as_secs_f64();
+                        let duration: Option<f32> = if duration_secs.is_finite() && duration_secs > 0.0 {
+                            Some(duration_secs as f32)
+                        } else {
+                            None
                         };
                         let mut lrc_query = LrclibQuery {
                             track_name: track_name.clone(),
@@ -237,6 +276,9 @@ async fn main() {
                         }
                         if config.ignore.contains(&"album_name".to_string()) || config.ignore.contains(&"album".to_string()) {
                             lrc_query.remove_album_name();
+                        }
+                        if config.search && (config.ignore.contains(&"artist_name".to_string()) || config.ignore.contains(&"artist".to_string())) {
+                            lrc_query.artist_name.clear();
                         }
                         match client.get(&lrc_query).await {
                             Ok(Some(lrc_item)) => {
@@ -265,7 +307,9 @@ async fn main() {
                                             if lrc_items.len() == 0 {
                                                 println!("Did not find lrc for (no results) {}",entry.path().display());
                                             } else {
-                                                let mut canidates = lrc_items;
+                                                let mut canidates: Vec<LrclibItem> = lrc_items.into_iter().filter(|item| {
+                                                    item.syncedLyrics.is_some() && !item.syncedLyrics.as_ref().unwrap().is_empty()
+                                                }).collect();
                                                 if let Some(duration) = &lrc_query.duration {
                                                     // sort by closed to target duration
                                                     canidates.sort_by(|a, b| {
@@ -275,10 +319,6 @@ async fn main() {
                                                         let b_delta = b_duration - duration;
                                                         return a_delta.abs().partial_cmp(&b_delta.abs()).unwrap();
                                                     }); 
-
-                                                    canidates = canidates.into_iter().filter(|item| {
-                                                        return item.syncedLyrics.is_some() && item.syncedLyrics.as_ref().unwrap().len() > 0;
-                                                    }).collect();
                                                 
                                                     if config.tolerance > 0.0 {
                                                         canidates = canidates.into_iter().filter(|item| {
