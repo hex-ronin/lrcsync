@@ -22,6 +22,8 @@ pub struct CliConfig {
     pub search: bool,
     #[arg(short = 't', long = "tolerance", default_value_t = 5.0, help = "tolerance in seconds for searching lrclib")]
     pub tolerance: f32,
+    #[arg(short = 'd', long = "delay", default_value_t = 500, help = "delay in milliseconds between lrclib requests")]
+    pub delay: u64,
 }
 
 static DEFAULT_USER_AGENT: &str = concat!(
@@ -37,6 +39,8 @@ static DEFAULT_USER_AGENT: &str = concat!(
 pub struct LrcLibClient {
     pub url: String,
     pub client: reqwest::Client,
+    pub delay_ms: u64,
+    has_requested: std::sync::atomic::AtomicBool,
 }
 
 pub struct LrclibQuery {
@@ -121,6 +125,8 @@ impl LrcLibClient {
         Self {
             url: "https://lrclib.net".to_string(),
             client: reqwest::Client::builder().default_headers(headers).user_agent(DEFAULT_USER_AGENT).build().expect("Failed to create reqwest client"),
+            delay_ms: 0,
+            has_requested: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -128,10 +134,21 @@ impl LrcLibClient {
         self.url = url.to_string();
     }
 
+    pub fn set_delay_ms(&mut self, delay_ms: u64) {
+        self.delay_ms = delay_ms;
+    }
+
+    async fn throttle(&self) {
+        if self.delay_ms > 0 && self.has_requested.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        }
+    }
+
     pub async fn get(&self, query: &LrclibQuery) -> anyhow::Result<Option<LrclibItem>> {
         if !query.can_use_get() {
             return Ok(None);
         }
+        self.throttle().await;
         let url = format!("{}/api/get" ,self.url);
         let request_builder = self.client.get(url).query(&query.to_get_query());
         let response = request_builder.send().await?;
@@ -160,6 +177,7 @@ impl LrcLibClient {
     }
 
     pub async fn search(&self, query: &LrclibQuery) -> anyhow::Result<Option<Vec<LrclibItem>>> {
+        self.throttle().await;
         let url = format!("{}/api/search" ,self.url);
         let request_builder = self.client.get(url).query(&query.to_search_query());
         let response = request_builder.send().await?;
@@ -215,6 +233,7 @@ async fn main() {
     let config = CliConfig::parse();
     let mut client = LrcLibClient::new(&config.lrclib_url);
     client.set_url(&config.lrclib_url);
+    client.set_delay_ms(config.delay);
     for result in WalkBuilder::new(".").hidden(config.hidden).add_custom_ignore_filename(".lrcsyncignore").build() {
         match result {
             Ok(entry) => {
